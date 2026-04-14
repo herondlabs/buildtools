@@ -1,10 +1,10 @@
 name: Package and Release Build Tools
 
 on:
-  # Trigger automatically when code is pushed or merged to main
+  # Trigger automatically when code is pushed or merged to ANY branch
   push:
     branches:
-      - main
+      - '**'
       
   # Allow manual trigger via GitHub Actions UI for testing
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0 
           clean: true
 
-      - name: Determine Version and Tag
+      - name: Determine Version, Tag, and Release Type
         id: get_version
         run: |
           # 1. Get the latest tag. If no tags exist, default to a base version that will yield v1.0.1
@@ -47,28 +47,44 @@ jobs:
           CURRENT_BRANCH=${GITHUB_REF_NAME}
           echo "Current branch: $CURRENT_BRANCH"
           
-          # 2. Calculate the final tag
+          # Initialize prerelease flag (default to true for safety)
+          IS_PRERELEASE="true"
+          
+          # 2. Calculate the final tag and determine release type
           if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
             # Use manual input if provided
             FINAL_TAG="${{ inputs.version }}"
+            
+            # Check if running manually on main to set it as a full release
+            if [ "$CURRENT_BRANCH" == "main" ]; then
+              IS_PRERELEASE="false"
+            fi
           else
             # Auto-increment logic
             if [ "$CURRENT_BRANCH" == "main" ]; then
               # On main branch: Increment minor version (Y), reset patch version (Z)
               NEW_Y=$((Y + 1))
               FINAL_TAG="v${X}.${NEW_Y}.0"
+              # Main branch is always a full release (not a pre-release)
+              IS_PRERELEASE="false"
             else
               # On other branches: Increment patch version (Z)
               NEW_Z=$((Z + 1))
               FINAL_TAG="v${X}.${Y}.${NEW_Z}"
+              # Other branches are always pre-releases
+              IS_PRERELEASE="true"
             fi
           fi
           
           # Ensure the final tag string always starts with a 'v'
           FINAL_TAG="v${FINAL_TAG#v}"
           
+          # Export variables to GitHub Environment for subsequent steps
           echo "FINAL_TAG=$FINAL_TAG" >> $GITHUB_ENV
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_ENV
+          
           echo "Determined Tag: $FINAL_TAG"
+          echo "Is Pre-release: $IS_PRERELEASE"
 
       - name: Create tar.gz archive
         run: |
@@ -87,14 +103,14 @@ jobs:
           echo "Compression completed successfully."
 
       - name: Create GitHub Release and Upload Asset
-        # CRITICAL: Only execute this step if the workflow is running on the main branch
-        if: github.ref == 'refs/heads/main'
+        # This step now runs on ALL branches
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.FINAL_TAG }}
           name: Release ${{ env.FINAL_TAG }}
           files: ${{ env.ARCHIVE_NAME }}
           draft: false 
-          prerelease: false
+          # Dynamically toggle the Pre-release badge based on the branch logic
+          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
