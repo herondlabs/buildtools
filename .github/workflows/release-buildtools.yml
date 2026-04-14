@@ -22,7 +22,7 @@ permissions:
 jobs:
   package-and-release:
     name: Create tar.gz and Publish Release
-    runs-on: [self-hosted, buildtool]
+    runs-on: ubuntu-latest
     
     steps:
       - name: Checkout repository
@@ -33,7 +33,6 @@ jobs:
 
       - name: Determine Version and Tag
         id: get_version
-        shell: bash 
         run: |
           # 1. Get the latest tag. If no tags exist, default to a base version that will yield v1.0.1
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
@@ -72,10 +71,6 @@ jobs:
           echo "Determined Tag: $FINAL_TAG"
 
       - name: Create tar.gz archive
-        shell: bash
-        # Prevent macOS from adding hidden 'AppleDouble' metadata files (._*)
-        env:
-          COPYFILE_DISABLE: 1
         run: |
           REPO_NAME=$(basename ${{ github.repository }})
           ARCHIVE_NAME="${REPO_NAME}-${{ env.FINAL_TAG }}.tar.gz"
