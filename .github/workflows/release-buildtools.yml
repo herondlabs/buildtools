@@ -1,0 +1,79 @@
+name: Package and Release Buildtools
+
+on:
+  # Automatically trigger the workflow when a new tag starting with 'v' is pushed
+  push:
+    tags:
+      - 'v*'
+      
+  # Allow manual trigger via the GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Defined tag/version name for the release (e.g., v1.0.1)'
+        required: true
+        type: string
+
+# Grant write permissions necessary for creating a GitHub Release
+permissions:
+  contents: write
+
+jobs:
+  package-and-release:
+    name: Create tar.gz and Publish Release
+    # Target the specific self-hosted runner using the 'buildtool' tag
+    runs-on: [self-hosted, buildtool]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history to ensure tags and branches are correctly resolved
+          fetch-depth: 0 
+          clean: true
+
+      - name: Determine Release Tag
+        id: get_version
+        # Enforce bash shell for cross-platform consistency on self-hosted runners
+        shell: bash 
+        run: |
+          # Determine the tag name based on the trigger event (manual vs automatic)
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "TAG_NAME=${{ inputs.version }}" >> $GITHUB_ENV
+          else
+            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          fi
+
+      - name: Create tar.gz archive
+        shell: bash
+        # Prevent macOS from adding hidden 'AppleDouble' metadata files (._*) to the archive
+        env:
+          COPYFILE_DISABLE: 1
+        run: |
+          # Define the archive name using the repository name and the resolved tag
+          REPO_NAME=$(basename ${{ github.repository }})
+          ARCHIVE_NAME="${REPO_NAME}-${{ env.TAG_NAME }}.tar.gz"
+          
+          # Export to environment variables for subsequent steps
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+          
+          echo "Starting to compress the workspace into $ARCHIVE_NAME..."
+          
+          # Place --exclude flags before the source directory ('.') for full BSD tar compatibility.
+          # We exclude the .git folder to save space, the archive itself, and macOS .DS_Store files.
+          tar --exclude='.git' --exclude="$ARCHIVE_NAME" --exclude='.DS_Store' -czvf "$ARCHIVE_NAME" .
+          
+          echo "Compression completed successfully."
+
+      - name: Create GitHub Release and Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: Release ${{ env.TAG_NAME }}
+          files: ${{ env.ARCHIVE_NAME }}
+          # Set draft to true if you prefer to review the release notes before publishing
+          draft: false 
+          prerelease: false
+        env:
+          # Required token to authenticate the release creation
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
