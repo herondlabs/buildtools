@@ -1,12 +1,12 @@
 name: Package and Release Build Tools
 
 on:
-  # Trigger automatically when code is pushed or merged to ANY branch
+  # Trigger automatically ONLY when code is pushed or merged to the main branch
   push:
     branches:
-      - '**'
+      - main
       
-  # Allow manual trigger via GitHub Actions UI for testing
+  # Allow manual trigger via GitHub Actions UI for any branch (Development builds)
   workflow_dispatch:
     inputs:
       version:
@@ -34,7 +34,7 @@ jobs:
       - name: Determine Version, Tag, and Release Type
         id: get_version
         run: |
-          # 1. Get the latest tag. If no tags exist, default to a base version that will yield v1.0.1
+          # 1. Get the latest tag. If no tags exist, default to v1.0.0 (so next dev build becomes v1.0.1)
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
           
           # Remove the 'v' prefix for arithmetic operations
@@ -43,47 +43,58 @@ jobs:
           # Split the version string into X, Y, and Z components
           IFS='.' read -r X Y Z <<< "$VERSION_ONLY"
           
-          # Get the branch name where the workflow is currently running
+          # Get the current branch name (main or the one selected manually)
           CURRENT_BRANCH=${GITHUB_REF_NAME}
           echo "Current branch: $CURRENT_BRANCH"
           
-          # Initialize prerelease flag (default to true for safety)
+          # Initialize defaults for Development builds
           IS_PRERELEASE="true"
+          RELEASE_TITLE_PREFIX="Development"
           
           # 2. Calculate the final tag and determine release type
           if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
-            # Use manual input if provided
+            # Priority 1: Use manual input version if provided
             FINAL_TAG="${{ inputs.version }}"
             
-            # Check if running manually on main to set it as a full release
+            # If manually triggered on main, treat as a full release
             if [ "$CURRENT_BRANCH" == "main" ]; then
               IS_PRERELEASE="false"
+              RELEASE_TITLE_PREFIX="Release"
             fi
           else
-            # Auto-increment logic
+            # Priority 2: Auto-increment logic
             if [ "$CURRENT_BRANCH" == "main" ]; then
-              # On main branch: Increment minor version (Y), reset patch version (Z)
+              # Main branch builds: Increment minor version (Y) and reset patch (Z)
               NEW_Y=$((Y + 1))
               FINAL_TAG="v${X}.${NEW_Y}.0"
-              # Main branch is always a full release (not a pre-release)
+              
+              # Set as full release for main branch
               IS_PRERELEASE="false"
+              RELEASE_TITLE_PREFIX="Release"
             else
-              # On other branches: Increment patch version (Z)
+              # Non-main branches (Manual): Increment patch version (Z)
               NEW_Z=$((Z + 1))
               FINAL_TAG="v${X}.${Y}.${NEW_Z}"
-              # Other branches are always pre-releases
+              
+              # Set as pre-release for development branches
               IS_PRERELEASE="true"
+              RELEASE_TITLE_PREFIX="Development"
             fi
           fi
           
-          # Ensure the final tag string always starts with a 'v'
+          # Ensure final tag string starts with 'v'
           FINAL_TAG="v${FINAL_TAG#v}"
           
-          # Export variables to GitHub Environment for subsequent steps
+          # Construct the full release title (e.g., "Development v1.0.1")
+          RELEASE_TITLE="${RELEASE_TITLE_PREFIX} ${FINAL_TAG}"
+          
+          # Export to environment variables
           echo "FINAL_TAG=$FINAL_TAG" >> $GITHUB_ENV
           echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_ENV
+          echo "RELEASE_TITLE=$RELEASE_TITLE" >> $GITHUB_ENV
           
           echo "Determined Tag: $FINAL_TAG"
+          echo "Release Title: $RELEASE_TITLE"
           echo "Is Pre-release: $IS_PRERELEASE"
 
       - name: Create tar.gz archive
@@ -94,23 +105,22 @@ jobs:
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
           echo "Starting to compress the workspace into $ARCHIVE_NAME..."
           
-          # Output the tar file to the parent directory (../) to prevent "file changed as we read it" error
+          # Output tar file to parent dir to avoid "file changed as we read it" error
           tar --exclude='.git' --exclude='.DS_Store' -czvf "../$ARCHIVE_NAME" .
           
-          # Move the completed archive back into the current workspace
+          # Move it back to the workspace for the upload step
           mv "../$ARCHIVE_NAME" .
           
           echo "Compression completed successfully."
 
       - name: Create GitHub Release and Upload Asset
-        # This step now runs on ALL branches
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.FINAL_TAG }}
-          name: Release ${{ env.FINAL_TAG }}
+          name: ${{ env.RELEASE_TITLE }}
           files: ${{ env.ARCHIVE_NAME }}
           draft: false 
-          # Dynamically toggle the Pre-release badge based on the branch logic
+          # Toggle Pre-release flag based on the branch detection
           prerelease: ${{ env.IS_PRERELEASE == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
