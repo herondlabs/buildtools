@@ -1,5 +1,5 @@
 name: Package and Release Build Tools
-
+## This workflow automates the packaging of the repository into a tar.gz archive and publishes it as a GitHub Release.
 on:
   # Trigger automatically ONLY when code is pushed or merged to the main branch
   push:
