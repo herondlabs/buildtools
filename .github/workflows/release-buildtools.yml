@@ -1,18 +1,19 @@
-name: Package and Release Buildtools
+name: Package and Release Build Tools
 
 on:
-  # Automatically trigger the workflow when a new tag starting with 'v' is pushed
+  # Trigger automatically when code is pushed or merged to main
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
       
-  # Allow manual trigger via the GitHub Actions UI
+  # Allow manual trigger via GitHub Actions UI for testing
   workflow_dispatch:
     inputs:
       version:
-        description: 'Defined tag/version name for the release (e.g., v1.0.1)'
-        required: true
+        description: 'Manual version (X.Y.Z). Leave empty for auto-increment'
+        required: false
         type: string
+        default: ''
 
 # Grant write permissions necessary for creating a GitHub Release
 permissions:
@@ -21,59 +22,84 @@ permissions:
 jobs:
   package-and-release:
     name: Create tar.gz and Publish Release
-    # Target the specific self-hosted runner using the 'buildtool' tag
     runs-on: [self-hosted, buildtool]
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Fetch full history to ensure tags and branches are correctly resolved
           fetch-depth: 0 
           clean: true
 
-      - name: Determine Release Tag
+      - name: Determine Version and Tag
         id: get_version
-        # Enforce bash shell for cross-platform consistency on self-hosted runners
         shell: bash 
         run: |
-          # Determine the tag name based on the trigger event (manual vs automatic)
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "TAG_NAME=${{ inputs.version }}" >> $GITHUB_ENV
+          # 1. Get the latest tag. If no tags exist, default to a base version that will yield v1.0.1
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
+          
+          # Remove the 'v' prefix for arithmetic operations
+          VERSION_ONLY=${LATEST_TAG#v}
+          
+          # Split the version string into X, Y, and Z components
+          IFS='.' read -r X Y Z <<< "$VERSION_ONLY"
+          
+          # Get the branch name where the workflow is currently running
+          CURRENT_BRANCH=${GITHUB_REF_NAME}
+          echo "Current branch: $CURRENT_BRANCH"
+          
+          # 2. Calculate the final tag
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            # Use manual input if provided
+            FINAL_TAG="${{ inputs.version }}"
           else
-            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+            # Auto-increment logic
+            if [ "$CURRENT_BRANCH" == "main" ]; then
+              # On main branch: Increment minor version (Y), reset patch version (Z)
+              NEW_Y=$((Y + 1))
+              FINAL_TAG="v${X}.${NEW_Y}.0"
+            else
+              # On other branches: Increment patch version (Z)
+              NEW_Z=$((Z + 1))
+              FINAL_TAG="v${X}.${Y}.${NEW_Z}"
+            fi
           fi
+          
+          # Ensure the final tag string always starts with a 'v'
+          FINAL_TAG="v${FINAL_TAG#v}"
+          
+          echo "FINAL_TAG=$FINAL_TAG" >> $GITHUB_ENV
+          echo "Determined Tag: $FINAL_TAG"
 
       - name: Create tar.gz archive
         shell: bash
-        # Prevent macOS from adding hidden 'AppleDouble' metadata files (._*) to the archive
+        # Prevent macOS from adding hidden 'AppleDouble' metadata files (._*)
         env:
           COPYFILE_DISABLE: 1
         run: |
-          # Define the archive name using the repository name and the resolved tag
           REPO_NAME=$(basename ${{ github.repository }})
-          ARCHIVE_NAME="${REPO_NAME}-${{ env.TAG_NAME }}.tar.gz"
+          ARCHIVE_NAME="${REPO_NAME}-${{ env.FINAL_TAG }}.tar.gz"
           
-          # Export to environment variables for subsequent steps
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
-          
           echo "Starting to compress the workspace into $ARCHIVE_NAME..."
           
-          # Place --exclude flags before the source directory ('.') for full BSD tar compatibility.
-          # We exclude the .git folder to save space, the archive itself, and macOS .DS_Store files.
-          tar --exclude='.git' --exclude="$ARCHIVE_NAME" --exclude='.DS_Store' -czvf "$ARCHIVE_NAME" .
+          # Output the tar file to the parent directory (../) to prevent "file changed as we read it" error
+          tar --exclude='.git' --exclude='.DS_Store' -czvf "../$ARCHIVE_NAME" .
+          
+          # Move the completed archive back into the current workspace
+          mv "../$ARCHIVE_NAME" .
           
           echo "Compression completed successfully."
 
       - name: Create GitHub Release and Upload Asset
+        # CRITICAL: Only execute this step if the workflow is running on the main branch
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.TAG_NAME }}
-          name: Release ${{ env.TAG_NAME }}
+          tag_name: ${{ env.FINAL_TAG }}
+          name: Release ${{ env.FINAL_TAG }}
           files: ${{ env.ARCHIVE_NAME }}
-          # Set draft to true if you prefer to review the release notes before publishing
           draft: false 
           prerelease: false
         env:
-          # Required token to authenticate the release creation
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
