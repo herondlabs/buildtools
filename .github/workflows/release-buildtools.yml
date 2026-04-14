@@ -1,21 +1,16 @@
 name: Package and Release Build Tools
 
 on:
-  # Trigger automatically ONLY when code is pushed or merged to the main branch
+  # Automatically trigger when code is pushed/merged to the main branch
   push:
     branches:
       - main
       
-  # Allow manual trigger via GitHub Actions UI for any branch (Development builds)
+  # Allow manual trigger via GitHub Actions UI for development builds on any branch
+  # NOTE: Inputs have been removed. The system strictly uses auto-increment.
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Manual version (X.Y.Z). Leave empty for auto-increment'
-        required: false
-        type: string
-        default: ''
 
-# Grant write permissions necessary for creating a GitHub Release
+# Grant write permissions necessary for creating a GitHub Release and pushing tags
 permissions:
   contents: write
 
@@ -28,69 +23,53 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          # Required to fetch all tags for accurate version calculation
           fetch-depth: 0 
           clean: true
 
       - name: Determine Version, Tag, and Release Type
         id: get_version
         run: |
-          # 0. Fetch all tags from remote to ensure local runner is up-to-date
+          # STEP 1: Sync local runner with remote tags to ensure accuracy
           git fetch --tags --force
           
-          # 1. CRITICAL FIX: Get the absolute highest tag in the repo using Version Sort (-V)
-          # This ignores commit tree topology and simply finds the mathematically highest version
+          # STEP 2: Find the absolute highest tag in the repository using Version Sort (-V)
           LATEST_TAG=$(git tag -l "v*" | sort -V | tail -n 1)
           
-          # If no tags exist at all, default to v1.0.0
+          # Fallback if the repository has absolutely no tags yet
           if [ -z "$LATEST_TAG" ]; then
             LATEST_TAG="v1.0.0"
           fi
           
           echo "Highest tag found in repo: $LATEST_TAG"
           
-          # Remove the 'v' prefix for arithmetic operations
+          # STEP 3: Parse the highest tag into X, Y, Z components
           VERSION_ONLY=${LATEST_TAG#v}
-          
-          # Split the version string into X, Y, and Z components
           IFS='.' read -r X Y Z <<< "$VERSION_ONLY"
           
-          # Get the current branch name
           CURRENT_BRANCH=${GITHUB_REF_NAME}
           echo "Current branch: $CURRENT_BRANCH"
           
-          # Initialize defaults for Development builds
-          IS_PRERELEASE="true"
-          RELEASE_TITLE_PREFIX="Development"
-          
-          # 2. Calculate the final tag and determine release type
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
-            FINAL_TAG="${{ inputs.version }}"
-            if [ "$CURRENT_BRANCH" == "main" ]; then
-              IS_PRERELEASE="false"
-              RELEASE_TITLE_PREFIX="Release"
-            fi
+          # STEP 4: Pure Auto-increment logic based on the current branch
+          if [ "$CURRENT_BRANCH" == "main" ]; then
+            # Main branch (Release): Increment Y, reset Z to 0
+            NEW_Y=$((Y + 1))
+            FINAL_TAG="v${X}.${NEW_Y}.0"
+            IS_PRERELEASE="false"
+            RELEASE_TITLE_PREFIX="Release"
           else
-            # Auto-increment logic
-            if [ "$CURRENT_BRANCH" == "main" ]; then
-              NEW_Y=$((Y + 1))
-              FINAL_TAG="v${X}.${NEW_Y}.0"
-              IS_PRERELEASE="false"
-              RELEASE_TITLE_PREFIX="Release"
-            else
-              NEW_Z=$((Z + 1))
-              FINAL_TAG="v${X}.${Y}.${NEW_Z}"
-              IS_PRERELEASE="true"
-              RELEASE_TITLE_PREFIX="Development"
-            fi
+            # Other branches (Development): Increment Z only, keep Y the same
+            NEW_Z=$((Z + 1))
+            FINAL_TAG="v${X}.${Y}.${NEW_Z}"
+            IS_PRERELEASE="true"
+            RELEASE_TITLE_PREFIX="Development"
           fi
           
-          # Ensure final tag string starts with 'v'
+          # Ensure final format is correct (e.g., v1.1.0)
           FINAL_TAG="v${FINAL_TAG#v}"
-          
-          # Construct the full release title (e.g., "Development v1.0.1")
           RELEASE_TITLE="${RELEASE_TITLE_PREFIX} ${FINAL_TAG}"
           
-          # Export to environment variables
+          # Export variables for subsequent steps
           echo "FINAL_TAG=$FINAL_TAG" >> $GITHUB_ENV
           echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_ENV
           echo "RELEASE_TITLE=$RELEASE_TITLE" >> $GITHUB_ENV
@@ -106,20 +85,41 @@ jobs:
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
           echo "Starting to compress the workspace into $ARCHIVE_NAME..."
           
+          # Compress to parent directory to avoid recursive compression errors (file changed as we read it)
           tar --exclude='.git' --exclude='.DS_Store' -czvf "../$ARCHIVE_NAME" .
+          
+          # Move the archive back into the workspace
           mv "../$ARCHIVE_NAME" .
           
           echo "Compression completed successfully."
 
+      - name: Create Git Tag and Push to Remote
+        run: |
+          # Configure git identity for the automation bot
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          echo "Creating local tag: ${{ env.FINAL_TAG }}"
+          git tag -a "${{ env.FINAL_TAG }}" -m "${{ env.RELEASE_TITLE }}"
+
+          # Push the tag. We do NOT use --force here. 
+          # If the tag somehow exists remotely, this command will fail safely.
+          git push origin "${{ env.FINAL_TAG }}"
+          
+          echo "Tag ${{ env.FINAL_TAG }} has been successfully pushed to origin."
+
       - name: Create GitHub Release and Upload Asset
         uses: softprops/action-gh-release@v2
         with:
-          # CRITICAL FIX: Explicitly tell GitHub to attach this tag/release to the exact commit SHA being built
+          # Pin the release to the exact commit SHA being built
           target_commitish: ${{ github.sha }}
           tag_name: ${{ env.FINAL_TAG }}
           name: ${{ env.RELEASE_TITLE }}
           files: ${{ env.ARCHIVE_NAME }}
           draft: false 
+          # Toggle Pre-release status dynamically based on the branch
           prerelease: ${{ env.IS_PRERELEASE == 'true' }}
+          # Automatically generate a changelog based on commits between this tag and the previous one
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
