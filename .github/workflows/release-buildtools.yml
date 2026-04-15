@@ -1,79 +1,140 @@
-name: Package and Release Buildtools
+name: Package and Release Build Tools
 
 on:
-  # Automatically trigger the workflow when a new tag starting with 'v' is pushed
+  # Automatically trigger when code is pushed/merged to the main branch
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
       
-  # Allow manual trigger via the GitHub Actions UI
+  # Allow manual trigger via GitHub Actions UI for development builds on any branch
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Defined tag/version name for the release (e.g., v1.0.1)'
-        required: true
-        type: string
 
-# Grant write permissions necessary for creating a GitHub Release
+# Grant write permissions necessary for creating a GitHub Release and pushing tags
 permissions:
   contents: write
-
+  
 jobs:
   package-and-release:
-    name: Create tar.gz and Publish Release
-    # Target the specific self-hosted runner using the 'buildtool' tag
-    runs-on: [self-hosted, buildtool]
+    name: Auto Release Builder
+    runs-on: ubuntu-latest
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          # Fetch full history to ensure tags and branches are correctly resolved
+          # Required to fetch all tags for accurate version calculation
           fetch-depth: 0 
           clean: true
 
-      - name: Determine Release Tag
-        id: get_version
-        # Enforce bash shell for cross-platform consistency on self-hosted runners
-        shell: bash 
-        run: |
-          # Determine the tag name based on the trigger event (manual vs automatic)
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "TAG_NAME=${{ inputs.version }}" >> $GITHUB_ENV
-          else
-            echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-          fi
-
-      - name: Create tar.gz archive
-        shell: bash
-        # Prevent macOS from adding hidden 'AppleDouble' metadata files (._*) to the archive
-        env:
-          COPYFILE_DISABLE: 1
-        run: |
-          # Define the archive name using the repository name and the resolved tag
-          REPO_NAME=$(basename ${{ github.repository }})
-          ARCHIVE_NAME="${REPO_NAME}-${{ env.TAG_NAME }}.tar.gz"
-          
-          # Export to environment variables for subsequent steps
-          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
-          
-          echo "Starting to compress the workspace into $ARCHIVE_NAME..."
-          
-          # Place --exclude flags before the source directory ('.') for full BSD tar compatibility.
-          # We exclude the .git folder to save space, the archive itself, and macOS .DS_Store files.
-          tar --exclude='.git' --exclude="$ARCHIVE_NAME" --exclude='.DS_Store' -czvf "$ARCHIVE_NAME" .
-          
-          echo "Compression completed successfully."
-
-      - name: Create GitHub Release and Upload Asset
-        uses: softprops/action-gh-release@v2
+      - name: Execute Node.js Release Logic
+        uses: actions/github-script@v9
         with:
-          tag_name: ${{ env.TAG_NAME }}
-          name: Release ${{ env.TAG_NAME }}
-          files: ${{ env.ARCHIVE_NAME }}
-          # Set draft to true if you prefer to review the release notes before publishing
-          draft: false 
-          prerelease: false
-        env:
-          # Required token to authenticate the release creation
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
+
+            const { owner, repo } = context.repo;
+            const currentBranch = process.env.GITHUB_REF_NAME;
+
+            core.info(`Starting Auto-Release Process for branch: ${currentBranch}`);
+
+            // 1. Fetch all tags from the remote to ensure local state is updated
+            execSync('git fetch --tags --force');
+
+            // 2. Get all tags starting with 'v' and sort them using Semantic Versioning
+            const tagsOutput = execSync('git tag -l "v*"').toString();
+            const tags = tagsOutput.split('\n').map(t => t.trim()).filter(Boolean);
+            
+            tags.sort((a, b) => {
+              const pa = a.replace(/^v/, '').split('.').map(Number);
+              const pb = b.replace(/^v/, '').split('.').map(Number);
+              for (let i = 0; i < 3; i++) {
+                if (pa[i] > pb[i]) return 1;
+                if (pa[i] < pb[i]) return -1;
+              }
+              return 0;
+            });
+
+            // 3. Determine the latest tag (Fallback to v1.0.0 if none exist)
+            const latestTag = tags.length > 0 ? tags[tags.length - 1] : 'v1.0.0';
+            core.info(`==> Highest tag found in repository: ${latestTag}`);
+
+            const [X, Y, Z] = latestTag.replace(/^v/, '').split('.').map(Number);
+            let finalTag = '';
+            let isPrerelease = true;
+            let releaseTitlePrefix = 'Development';
+
+            // 4. Pure Auto-increment Logic
+            if (currentBranch === 'main') {
+              finalTag = `v${X}.${Y + 1}.0`; // Increment Y, reset Z
+              isPrerelease = false;
+              releaseTitlePrefix = 'Release';
+            } else {
+              finalTag = `v${X}.${Y}.${Z + 1}`; // Increment Z
+              isPrerelease = true;
+              releaseTitlePrefix = 'Development';
+            }
+
+
+            const releaseTitle = `${releaseTitlePrefix} ${finalTag}`;
+            core.info(`==> Calculated Final Tag: ${finalTag}`);
+
+            // 5. Compress Source Code (tar.gz)
+            const archiveName = `${repo}-${finalTag}.tar.gz`;
+            const workspace = process.env.GITHUB_WORKSPACE;
+            
+            // Output tarball to parent directory to prevent "file changed as we read it" error
+            const tempArchivePath = path.join(workspace, '..', archiveName);
+            const finalArchivePath = path.join(workspace, archiveName);
+
+            core.info(`==> Compressing workspace into ${archiveName}...`);
+            // Execute shell command to compress
+            execSync(`tar --exclude=.git --exclude=.DS_Store -czvf ${tempArchivePath} .`, { cwd: workspace });
+            // Move it back
+            fs.renameSync(tempArchivePath, finalArchivePath);
+
+            // 6. Create local Git Tag and Push to remote safely
+            core.info(`==> Pushing Tag ${finalTag} to remote...`);
+            execSync('git config user.name "github-actions[bot]"');
+            execSync('git config user.email "github-actions[bot]@users.noreply.github.com"');
+            execSync(`git tag -a ${finalTag} -m "${releaseTitle}"`);
+            
+            try {
+              execSync(`git push origin ${finalTag}`);
+            } catch (error) {
+              core.setFailed(`FAILED TO PUSH TAG: Tag ${finalTag} might already exist on remote.`);
+              return;
+            }
+
+            // 7. Call GitHub API to Create the Release
+            core.info('==> Creating GitHub Release...');
+            const releaseResponse = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: finalTag,
+              target_commitish: context.sha,
+              name: releaseTitle,
+              draft: false,
+              prerelease: isPrerelease,
+              generate_release_notes: true // Auto-generate changelog
+            });
+
+            // 8. Upload the .tar.gz Asset
+            core.info('==> Uploading Release Asset...');
+            const fileBuffer = fs.readFileSync(finalArchivePath);
+            
+            await github.rest.repos.uploadReleaseAsset({
+              owner,
+              repo,
+              release_id: releaseResponse.data.id,
+              name: archiveName,
+              data: fileBuffer,
+              headers: {
+                'content-type': 'application/gzip',
+                'content-length': fileBuffer.length
+              }
+            });
+
+            core.info(`SUCCESS! Auto-Release created at: ${releaseResponse.data.html_url}`);
