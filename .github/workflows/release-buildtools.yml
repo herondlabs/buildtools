@@ -12,7 +12,7 @@ on:
 # Grant write permissions necessary for creating a GitHub Release and pushing tags
 permissions:
   contents: write
-
+  
 jobs:
   package-and-release:
     name: Auto Release Builder
@@ -20,14 +20,14 @@ jobs:
     
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # Required to fetch all tags for accurate version calculation
           fetch-depth: 0 
           clean: true
 
       - name: Execute Node.js Release Logic
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
